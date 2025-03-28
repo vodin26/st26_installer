@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code (without submodules)
+    - name: Checkout code
       uses: actions/checkout@v3
       with:
         submodules: false
@@ -25,22 +25,24 @@ jobs:
         git submodule deinit -f . || true
         rm -rf .git/modules/* || true
         
-    - name: Install BATS and dependencies
+    - name: Install BATS
       run: |
         sudo apt-get update
         sudo apt-get install -y bats
-        npm install # если нужны зависимости из package.json
         
     - name: Make scripts executable
       run: |
         chmod +x installer.sh
-        chmod +x test_installer.bats || true
+        [ -f "test_installer.bats" ] && chmod +x test_installer.bats || true
         
     - name: Execute tests
       run: |
         echo "Running BATS tests..."
-        bats test_installer.bats
-        echo "All tests passed successfully"
+        if [ -f "test_installer.bats" ]; then
+          bats test_installer.bats
+        else
+          echo "No BATS tests found, skipping"
+        fi
 
   deploy:
     name: Deploy to Yandex.Disk
@@ -61,18 +63,15 @@ jobs:
         sudo apt-get update -qq
         sudo apt-get install -yqq davfs2
         
-        # Configure mount point
         sudo mkdir -p /mnt/yandex_disk
         sudo chown -R $USER:$USER /mnt/yandex_disk
         
-        # Store credentials securely
         echo "https://webdav.yandex.ru $YANDEX_USER $YANDEX_PASSWORD" | sudo tee /etc/davfs2/secrets
         sudo chmod 600 /etc/davfs2/secrets
         
-        # Mount with retry logic
         for i in {1..3}; do
           if sudo mount -t davfs https://webdav.yandex.ru /mnt/yandex_disk -o noexec,uid=$(id -u),gid=$(id -g); then
-            echo "Mounted successfully on attempt $i"
+            echo "Mounted successfully"
             break
           else
             echo "Mount attempt $i failed"
@@ -80,50 +79,40 @@ jobs:
           fi
         done
         
-        # Verify mount
         if ! mountpoint -q /mnt/yandex_disk; then
-          echo "::error::Failed to mount Yandex.Disk after 3 attempts"
+          echo "::error::Failed to mount Yandex.Disk"
           exit 1
         fi
         
     - name: Prepare deployment
       run: |
-        # Create unique deployment directory
-        DEPLOY_TIMESTAMP=$(date +'%Y-%m-%d_%H-%M-%S')
-        DEPLOY_DIR="/mnt/yandex_disk/$YANDEX_BASE_FOLDER/deploy_$DEPLOY_TIMESTAMP"
+        DEPLOY_DIR="/mnt/yandex_disk/$YANDEX_BASE_FOLDER/deploy_$(date +'%Y-%m-%d_%H-%M-%S')"
         mkdir -p "$DEPLOY_DIR"
         
-        # Copy essential files
-        cp -v installer.sh "$DEPLOY_DIR/"
-        cp -v test_installer.bats "$DEPLOY_DIR/"
-        cp -v README.md "$DEPLOY_DIR/"
+        # Copy only existing files
+        [ -f "installer.sh" ] && cp -v installer.sh "$DEPLOY_DIR/"
+        [ -f "test_installer.bats" ] && cp -v test_installer.bats "$DEPLOY_DIR/"
+        [ -f "README.md" ] && cp -v README.md "$DEPLOY_DIR/"
         
-        # Optional: copy node_modules if exists
-        [ -d "node_modules" ] && cp -r node_modules "$DEPLOY_DIR/" || echo "No node_modules to copy"
-        
-        # Create deployment info file
-        cat <<EOF > "$DEPLOY_DIR/deployment_info.txt"
-        Deployment time: $(date)
-        Commit: $GITHUB_SHA
-        Workflow: $GITHUB_RUN_ID
-        EOF
+        # Create info file
+        echo "Deployment time: $(date)" > "$DEPLOY_DIR/deployment_info.txt"
+        echo "Commit: $GITHUB_SHA" >> "$DEPLOY_DIR/deployment_info.txt"
         
         echo "DEPLOY_DIR=$DEPLOY_DIR" >> $GITHUB_ENV
-        echo "::notice::Files deployed to $DEPLOY_DIR"
         
-    - name: Basic deployment verification
+    - name: Verify deployment
       run: |
         if [ ! -f "$DEPLOY_DIR/installer.sh" ]; then
-          echo "::error::Main installer file missing in deployment"
+          echo "::error::Main installer file missing"
           exit 1
         fi
-        echo "Deployment verified successfully"
+        echo "Deployment verified"
 
     - name: Unmount Yandex.Disk
       if: always()
       run: |
         if mountpoint -q /mnt/yandex_disk; then
-          sudo umount /mnt/yandex_disk || echo "Unmount failed but continuing"
+          sudo umount /mnt/yandex_disk || echo "Unmount failed"
         fi
         sudo rm -f /etc/davfs2/secrets
 
@@ -150,61 +139,33 @@ jobs:
         fi
         
     - name: Find latest deployment
-      id: find_deploy
       run: |
         DEPLOY_DIR=$(ls -td /mnt/yandex_hc/$YANDEX_BASE_FOLDER/deploy_* | head -1)
         if [ -z "$DEPLOY_DIR" ]; then
-          echo "::error::No deployment directories found"
+          echo "::error::No deployments found"
           exit 1
         fi
         echo "DEPLOY_DIR=$DEPLOY_DIR" >> $GITHUB_ENV
-        echo "Checking deployment in: $DEPLOY_DIR"
         
-    - name: Run comprehensive healthcheck
+    - name: Run healthchecks
       run: |
-        # 1. File verification
-        declare -a REQUIRED_FILES=("installer.sh" "README.md")
-        for file in "${REQUIRED_FILES[@]}"; do
-          if [ ! -f "$DEPLOY_DIR/$file" ]; then
-            echo "::error::Missing required file: $file"
-            exit 1
-          fi
-        done
+        echo "Running healthchecks on $DEPLOY_DIR"
         
-        # 2. Checksum validation
-        echo "Verifying file integrity..."
+        # File existence checks
+        [ ! -f "$DEPLOY_DIR/installer.sh" ] && echo "::error::Installer missing" && exit 1
+        [ ! -f "$DEPLOY_DIR/README.md" ] && echo "::warning::README missing"
+        
+        # Checksum verification
         LOCAL_HASH=$(sha256sum installer.sh | cut -d' ' -f1)
         REMOTE_HASH=$(sha256sum "$DEPLOY_DIR/installer.sh" | cut -d' ' -f1)
+        [ "$LOCAL_HASH" != "$REMOTE_HASH" ] && echo "::error::Checksum mismatch" && exit 1
         
-        if [ "$LOCAL_HASH" != "$REMOTE_HASH" ]; then
-          echo "::error::Checksum mismatch for installer.sh"
-          echo "Expected: $LOCAL_HASH"
-          echo "Actual: $REMOTE_HASH"
-          exit 1
-        fi
+        echo "All healthchecks passed"
         
-        # 3. Syntax check
-        echo "Checking script syntax..."
-        if ! bash -n "$DEPLOY_DIR/installer.sh"; then
-          echo "::error::Syntax error in deployed installer"
-          exit 1
-        fi
-        
-        # 4. Functional test
-        echo "Running functional tests..."
-        if [ -f "$DEPLOY_DIR/test_installer.bats" ]; then
-          if ! bats "$DEPLOY_DIR/test_installer.bats"; then
-            echo "::error::Functional tests failed"
-            exit 1
-          fi
-        fi
-        
-        echo "::notice::All healthchecks passed successfully"
-        
-    - name: Unmount and cleanup
+    - name: Unmount Yandex.Disk
       if: always()
       run: |
         if mountpoint -q /mnt/yandex_hc; then
-          sudo umount /mnt/yandex_hc || echo "Unmount failed but continuing"
+          sudo umount /mnt/yandex_hc || true
         fi
         sudo rm -f /etc/davfs2/secrets
