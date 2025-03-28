@@ -1,0 +1,61 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+      
+    - name: Install BATS
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bats
+        
+    - name: Run tests
+      run: bats test_installer.bats
+      
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+      
+    - name: Install Yandex Disk CLI tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y davfs2
+        sudo mkdir -p /mnt/yandex_disk
+        sudo mount -t davfs https://webdav.yandex.ru /mnt/yandex_disk -o noexec
+        
+    - name: Copy files to Yandex Disk
+      env:
+        YANDEX_USER: ${{ secrets.YANDEX_USER }}
+        YANDEX_PASSWORD: ${{ secrets.YANDEX_PASSWORD }}
+      run: |
+        # Создаем папку на Яндекс.Диске
+        FOLDER_NAME="deploy_$(date +'%Y-%m-%d_%H-%M-%S')"
+        sudo mkdir -p "/mnt/yandex_disk/$FOLDER_NAME"
+        
+        # Копируем файлы
+        sudo cp installer.sh "/mnt/yandex_disk/$FOLDER_NAME/"
+        sudo cp test_installer.bats "/mnt/yandex_disk/$FOLDER_NAME/"
+        sudo cp README.md "/mnt/yandex_disk/$FOLDER_NAME/"
+        
+        # Копируем node_modules (если нужно)
+        sudo cp -r node_modules "/mnt/yandex_disk/$FOLDER_NAME/" || echo "node_modules not copied"
+        
+        echo "Files copied to Yandex Disk folder: $FOLDER_NAME"
+        
+    - name: Unmount Yandex Disk
+      run: |
+        sudo umount /mnt/yandex_disk

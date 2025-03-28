@@ -1,0 +1,14 @@
+Version 1.1 RU
+
+Добавлена проверка пользователя при введении и добавление в группу audio
+
+Добавленны сборники в processing:
+
+AirWindows starter+
+Chow bondle
+Nih bondle
+Socalabs bondle
+Superfly bondle
+Wasted-Audio bondle
+OverTone bondle
+Distrho bondle
