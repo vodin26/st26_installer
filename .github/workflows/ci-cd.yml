@@ -127,6 +127,44 @@ jobs:
         fi
         
         echo "Deployment verification successful"
+
+    - name: Healthcheck
+      run: |
+        echo "Starting healthcheck..."
+        
+        # Check if deployed files are accessible
+        if ! [ -r "$DEPLOY_DIR/installer.sh" ]; then
+          echo "::error::Installer file is not readable"
+          exit 1
+        fi
+        
+        # Verify file integrity
+        ORIGINAL_HASH=$(sha256sum installer.sh | awk '{print $1}')
+        DEPLOYED_HASH=$(sha256sum "$DEPLOY_DIR/installer.sh" | awk '{print $1}')
+        
+        if [ "$ORIGINAL_HASH" != "$DEPLOYED_HASH" ]; then
+          echo "::error::File checksum mismatch"
+          echo "Original hash: $ORIGINAL_HASH"
+          echo "Deployed hash: $DEPLOYED_HASH"
+          exit 1
+        fi
+        
+        # Test script execution (if applicable)
+        if ! bash -n "$DEPLOY_DIR/installer.sh"; then
+          echo "::error::Installer script has syntax errors"
+          exit 1
+        fi
+        
+        # Additional custom checks
+        if [ -f "$DEPLOY_DIR/test_installer.bats" ]; then
+          echo "Running smoke tests..."
+          if ! bats "$DEPLOY_DIR/test_installer.bats"; then
+            echo "::error::Smoke tests failed on deployed files"
+            exit 1
+          fi
+        fi
+        
+        echo "Healthcheck passed successfully"
         
     - name: Cleanup and unmount
       if: always()
@@ -147,6 +185,7 @@ jobs:
       run: |
         if [ "$DEPLOY_DIR" != "" ]; then
           echo "::notice::Deployment completed successfully to $DEPLOY_DIR"
+          echo "::notice::Healthcheck passed"
         else
           echo "::warning::Deployment directory not set"
         fi
