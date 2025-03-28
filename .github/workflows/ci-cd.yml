@@ -86,15 +86,23 @@ jobs:
         
     - name: Prepare deployment
       run: |
-        DEPLOY_DIR="/mnt/yandex_disk/$YANDEX_BASE_FOLDER/deploy_$((date +'%H-%M-%S_%Y-%m-%d' --date='+3 hours')"
+        # Получаем время в UTC+3 (корректный синтаксис)
+        DEPLOY_TIME=$(date -d "+3 hours" +"%Y-%m-%d_%H-%M-%S")
+        
+        # Формируем путь
+        DEPLOY_DIR="/mnt/yandex_disk/$YANDEX_BASE_FOLDER/deploy_${DEPLOY_TIME}"
+        
         mkdir -p "$DEPLOY_DIR"
         
+        # Копируем только существующие файлы
         [ -f "installer.sh" ] && cp -v installer.sh "$DEPLOY_DIR/"
         [ -f "test_installer.bats" ] && cp -v test_installer.bats "$DEPLOY_DIR/"
         [ -f "README.md" ] && cp -v README.md "$DEPLOY_DIR/"
         
-        echo "Deployment time: $(date)" > "$DEPLOY_DIR/deployment_info.txt"
+        # Создаем файл с информацией о деплое
+        echo "Deployment time (UTC+3): ${DEPLOY_TIME}" > "$DEPLOY_DIR/deployment_info.txt"
         echo "Commit: $GITHUB_SHA" >> "$DEPLOY_DIR/deployment_info.txt"
+        echo "Workflow: $GITHUB_RUN_ID" >> "$DEPLOY_DIR/deployment_info.txt"
         
         echo "DEPLOY_DIR=$DEPLOY_DIR" >> $GITHUB_ENV
         echo "::notice::Files deployed to $DEPLOY_DIR"
@@ -127,7 +135,7 @@ jobs:
     - name: Setup test environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y bats  # Устанавливаем BATS явно
+        sudo apt-get install -y bats
         chmod +x installer.sh || true
       
     - name: Mount Yandex.Disk
@@ -159,7 +167,7 @@ jobs:
       run: |
         echo "Running healthchecks on $DEPLOY_DIR"
         
-        # Проверка наличия файлов
+        # Проверка наличия обязательных файлов
         [ ! -f "$DEPLOY_DIR/installer.sh" ] && echo "::error::Installer missing" && exit 1
         [ ! -f "$DEPLOY_DIR/README.md" ] && echo "::warning::README missing"
         
