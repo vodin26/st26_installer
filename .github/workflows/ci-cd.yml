@@ -124,6 +124,12 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v3
       
+    - name: Setup test environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bats  # Устанавливаем BATS явно
+        chmod +x installer.sh || true
+      
     - name: Mount Yandex.Disk
       env:
         YANDEX_USER: ${{ secrets.YANDEX_USER }}
@@ -153,24 +159,31 @@ jobs:
       run: |
         echo "Running healthchecks on $DEPLOY_DIR"
         
-        # Verify files exist
+        # Проверка наличия файлов
         [ ! -f "$DEPLOY_DIR/installer.sh" ] && echo "::error::Installer missing" && exit 1
         [ ! -f "$DEPLOY_DIR/README.md" ] && echo "::warning::README missing"
         
-        # Verify checksums
+        # Проверка контрольных сумм
         LOCAL_HASH=$(sha256sum installer.sh | cut -d' ' -f1)
         REMOTE_HASH=$(sha256sum "$DEPLOY_DIR/installer.sh" | cut -d' ' -f1)
         [ "$LOCAL_HASH" != "$REMOTE_HASH" ] && echo "::error::Checksum mismatch" && exit 1
         
-        # Verify syntax
+        # Проверка синтаксиса
         if ! bash -n "$DEPLOY_DIR/installer.sh"; then
           echo "::error::Syntax error in deployed installer"
           exit 1
         fi
         
-        # Run smoke tests if available
+        # Запуск тестов (если есть)
         if [ -f "$DEPLOY_DIR/test_installer.bats" ]; then
+          echo "Running BATS tests..."
+          if ! command -v bats >/dev/null 2>&1; then
+            echo "::error::BATS not installed in healthcheck environment"
+            exit 1
+          fi
           bats "$DEPLOY_DIR/test_installer.bats" || exit 1
+        else
+          echo "No BATS tests found in deployment, skipping"
         fi
         
         echo "All healthchecks passed"
