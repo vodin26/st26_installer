@@ -86,7 +86,7 @@ jobs:
         
     - name: Prepare deployment
       run: |
-        DEPLOY_DIR="/mnt/yandex_disk/$YANDEX_BASE_FOLDER/deploy_$(date +'%Y-%m-%d_%H-%M-%S')"
+        DEPLOY_DIR="/mnt/yandex_disk/$YANDEX_BASE_FOLDER/deploy_$((date +'%H-%M-%S_%Y-%m-%d' --date='+3 hours')"
         mkdir -p "$DEPLOY_DIR"
         
         [ -f "installer.sh" ] && cp -v installer.sh "$DEPLOY_DIR/"
