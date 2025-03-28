@@ -1,61 +1,152 @@
-name: CI/CD Pipeline
+name: CI/CD Pipeline to Yandex.Disk
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, master ]
 
 jobs:
   test:
+    name: Run BATS tests
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v2
+    - name: Checkout repository
+      uses: actions/checkout@v3
       
-    - name: Install BATS
+    - name: Install BATS testing framework
       run: |
         sudo apt-get update
         sudo apt-get install -y bats
         
-    - name: Run tests
-      run: bats test_installer.bats
+    - name: Make installer executable
+      run: chmod +x installer.sh
+      
+    - name: Execute tests
+      run: |
+        echo "Running BATS tests..."
+        bats test_installer.bats || (echo "Tests failed" && exit 1)
+        echo "All tests passed successfully"
       
   deploy:
+    name: Deploy to Yandex.Disk
     needs: test
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
       
-    - name: Install Yandex Disk CLI tools
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y davfs2
-        sudo mkdir -p /mnt/yandex_disk
-        sudo mount -t davfs https://webdav.yandex.ru /mnt/yandex_disk -o noexec
-        
-    - name: Copy files to Yandex Disk
+    - name: Setup WebDAV environment
       env:
         YANDEX_USER: ${{ secrets.YANDEX_USER }}
         YANDEX_PASSWORD: ${{ secrets.YANDEX_PASSWORD }}
+        YANDEX_BASE_FOLDER: ${{ secrets.YANDEX_BASE_FOLDER || 'github_deployments' }}
       run: |
-        # Создаем папку на Яндекс.Диске
-        FOLDER_NAME="deploy_$(date +'%Y-%m-%d_%H-%M-%S')"
-        sudo mkdir -p "/mnt/yandex_disk/$FOLDER_NAME"
+        echo "Setting up WebDAV connection to Yandex.Disk..."
         
-        # Копируем файлы
-        sudo cp installer.sh "/mnt/yandex_disk/$FOLDER_NAME/"
-        sudo cp test_installer.bats "/mnt/yandex_disk/$FOLDER_NAME/"
-        sudo cp README.md "/mnt/yandex_disk/$FOLDER_NAME/"
+        # Install required packages
+        sudo apt-get update -qq
+        sudo apt-get install -yqq davfs2
         
-        # Копируем node_modules (если нужно)
-        sudo cp -r node_modules "/mnt/yandex_disk/$FOLDER_NAME/" || echo "node_modules not copied"
+        # Create mount point
+        sudo mkdir -p /mnt/yandex_disk
+        sudo chown -R $USER:$USER /mnt/yandex_disk
         
-        echo "Files copied to Yandex Disk folder: $FOLDER_NAME"
+        # Configure davfs2
+        echo "https://webdav.yandex.ru $YANDEX_USER $YANDEX_PASSWORD" > ~/davfs2_secrets
+        chmod 600 ~/davfs2_secrets
+        sudo mv ~/davfs2_secrets /etc/davfs2/secrets
         
-    - name: Unmount Yandex Disk
+        # Mount Yandex.Disk
+        if ! sudo mount -t davfs https://webdav.yandex.ru /mnt/yandex_disk -o noexec,uid=$(id -u),gid=$(id -g); then
+          echo "::error::Failed to mount Yandex.Disk"
+          exit 1
+        fi
+        
+        echo "Yandex.Disk successfully mounted"
+        
+        # Verify base folder exists
+        TARGET_DIR="/mnt/yandex_disk/$YANDEX_BASE_FOLDER"
+        if [ ! -d "$TARGET_DIR" ]; then
+          echo "Creating target directory: $TARGET_DIR"
+          mkdir -p "$TARGET_DIR"
+        fi
+        
+    - name: Prepare deployment package
       run: |
-        sudo umount /mnt/yandex_disk
+        echo "Preparing files for deployment..."
+        mkdir -p deployment_package
+        
+        # Copy required files
+        cp installer.sh deployment_package/
+        cp test_installer.bats deployment_package/
+        cp README.md deployment_package/
+        
+        # Optionally copy node_modules (if exists)
+        if [ -d "node_modules" ]; then
+          echo "Copying node_modules (this may take a while)..."
+          cp -r node_modules deployment_package/
+        fi
+        
+        # Create version file
+        echo "Deployment time: $(date)" > deployment_package/deployment_info.txt
+        echo "Commit: $GITHUB_SHA" >> deployment_package/deployment_info.txt
+        
+    - name: Copy files to Yandex.Disk
+      env:
+        YANDEX_BASE_FOLDER: ${{ secrets.YANDEX_BASE_FOLDER || 'github_deployments' }}
+      run: |
+        echo "Starting file transfer to Yandex.Disk..."
+        DEPLOY_DIR="/mnt/yandex_disk/$YANDEX_BASE_FOLDER/deploy_$(date +'%Y-%m-%d_%H-%M-%S')"
+        
+        # Create deployment directory
+        mkdir -p "$DEPLOY_DIR"
+        
+        # Copy files with progress display
+        echo "Copying files to $DEPLOY_DIR"
+        rsync -ah --progress deployment_package/ "$DEPLOY_DIR/"
+        
+        # Set permissions
+        chmod -R 755 "$DEPLOY_DIR"
+        
+        echo "::notice::Files successfully deployed to Yandex.Disk: $DEPLOY_DIR"
+        echo "DEPLOY_DIR=$DEPLOY_DIR" >> $GITHUB_ENV
+        
+    - name: Verify deployment
+      run: |
+        echo "Verifying deployed files in $DEPLOY_DIR..."
+        ls -la "$DEPLOY_DIR"
+        
+        # Basic verification
+        if [ ! -f "$DEPLOY_DIR/installer.sh" ]; then
+          echo "::error::Main installer file missing in deployment"
+          exit 1
+        fi
+        
+        echo "Deployment verification successful"
+        
+    - name: Cleanup and unmount
+      if: always()
+      run: |
+        echo "Cleaning up..."
+        
+        # Unmount Yandex.Disk
+        if mountpoint -q /mnt/yandex_disk; then
+          sudo umount /mnt/yandex_disk
+          echo "Yandex.Disk successfully unmounted"
+        fi
+        
+        # Remove sensitive credentials
+        sudo rm -f /etc/davfs2/secrets
+        
+    - name: Post deployment status
+      if: always()
+      run: |
+        if [ "$DEPLOY_DIR" != "" ]; then
+          echo "::notice::Deployment completed successfully to $DEPLOY_DIR"
+        else
+          echo "::warning::Deployment directory not set"
+        fi
