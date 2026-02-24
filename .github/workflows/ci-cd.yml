@@ -86,7 +86,7 @@ jobs:
         
     - name: Prepare deployment
       run: |
-        # Получаем время в UTC+3 (корректный синтаксис)
+        # Получаем время в UTC+3
         DEPLOY_TIME=$(date -d "+3 hours" +"%Y-%m-%d_%H-%M-%S")
         
         # Формируем путь
@@ -94,26 +94,91 @@ jobs:
         
         mkdir -p "$DEPLOY_DIR"
         
-        # Копируем только существующие файлы
+        # Копируем основные файлы
+        echo "Копируем основные файлы..."
         [ -f "installer.sh" ] && cp -v installer.sh "$DEPLOY_DIR/"
         [ -f "test_installer.bats" ] && cp -v test_installer.bats "$DEPLOY_DIR/"
         [ -f "README.md" ] && cp -v README.md "$DEPLOY_DIR/"
+        
+        # Копируем директории с плагинами и синтезаторами
+        echo "Копируем директории с ресурсами..."
+        
+        if [ -d "synth" ]; then
+          echo "✅ Найдена директория synth, копируем..."
+          cp -rv synth "$DEPLOY_DIR/"
+        else
+          echo "⚠️ Директория synth не найдена"
+        fi
+        
+        if [ -d "processing" ]; then
+          echo "✅ Найдена директория processing, копируем..."
+          cp -rv processing "$DEPLOY_DIR/"
+        else
+          echo "⚠️ Директория processing не найдена"
+        fi
+        
+        if [ -d "tools" ]; then
+          echo "✅ Найдена директория tools, копируем..."
+          cp -rv tools "$DEPLOY_DIR/"
+        else
+          echo "⚠️ Директория tools не найдена"
+        fi
         
         # Создаем файл с информацией о деплое
         echo "Deployment time (UTC+3): ${DEPLOY_TIME}" > "$DEPLOY_DIR/deployment_info.txt"
         echo "Commit: $GITHUB_SHA" >> "$DEPLOY_DIR/deployment_info.txt"
         echo "Workflow: $GITHUB_RUN_ID" >> "$DEPLOY_DIR/deployment_info.txt"
         
+        # Сохраняем структуру скопированных файлов для отладки
+        echo -e "\nСтруктура деплоя:" >> "$DEPLOY_DIR/deployment_info.txt"
+        ls -la "$DEPLOY_DIR/" >> "$DEPLOY_DIR/deployment_info.txt"
+        
+        if [ -d "$DEPLOY_DIR/synth" ]; then
+          echo -e "\nСодержимое synth:" >> "$DEPLOY_DIR/deployment_info.txt"
+          ls -la "$DEPLOY_DIR/synth/" >> "$DEPLOY_DIR/deployment_info.txt"
+        fi
+        
+        if [ -d "$DEPLOY_DIR/processing" ]; then
+          echo -e "\nСодержимое processing:" >> "$DEPLOY_DIR/deployment_info.txt"
+          ls -la "$DEPLOY_DIR/processing/" >> "$DEPLOY_DIR/deployment_info.txt"
+        fi
+        
+        if [ -d "$DEPLOY_DIR/tools" ]; then
+          echo -e "\nСодержимое tools:" >> "$DEPLOY_DIR/deployment_info.txt"
+          ls -la "$DEPLOY_DIR/tools/" >> "$DEPLOY_DIR/deployment_info.txt"
+        fi
+        
         echo "DEPLOY_DIR=$DEPLOY_DIR" >> $GITHUB_ENV
         echo "::notice::Files deployed to $DEPLOY_DIR"
         
     - name: Verify deployment
       run: |
-        if [ ! -f "$DEPLOY_DIR/installer.sh" ]; then
-          echo "::error::Main installer file missing"
-          exit 1
+        echo "Проверка деплоя..."
+        
+        # Проверка наличия основных файлов
+        [ ! -f "$DEPLOY_DIR/installer.sh" ] && echo "::error::Main installer file missing" && exit 1
+        echo "✅ installer.sh присутствует"
+        
+        # Проверка наличия директорий
+        if [ -d "$DEPLOY_DIR/synth" ]; then
+          echo "✅ synth директория присутствует"
+        else
+          echo "⚠️ synth директория отсутствует"
         fi
-        echo "Deployment verified"
+        
+        if [ -d "$DEPLOY_DIR/processing" ]; then
+          echo "✅ processing директория присутствует"
+        else
+          echo "⚠️ processing директория отсутствует"
+        fi
+        
+        if [ -d "$DEPLOY_DIR/tools" ]; then
+          echo "✅ tools директория присутствует"
+        else
+          echo "⚠️ tools директория отсутствует"
+        fi
+        
+        echo "Деплой проверен успешно"
 
     - name: Unmount Yandex.Disk
       if: always()
@@ -168,16 +233,60 @@ jobs:
         echo "Running healthchecks on $DEPLOY_DIR"
         
         # Проверка наличия обязательных файлов
+        echo "Проверка основных файлов..."
         [ ! -f "$DEPLOY_DIR/installer.sh" ] && echo "::error::Installer missing" && exit 1
+        echo "✅ installer.sh найден"
+        
         [ ! -f "$DEPLOY_DIR/README.md" ] && echo "::warning::README missing"
         
-        # Проверка контрольных сумм
+        # Проверка наличия ресурсных директорий
+        echo "Проверка ресурсных директорий..."
+        
+        if [ -d "$DEPLOY_DIR/synth" ]; then
+          echo "✅ synth директория найдена"
+          # Проверка конкретных файлов для Vital
+          if [ -f "$DEPLOY_DIR/synth/vital/vital" ]; then
+            echo "  ✅ vital файл найден"
+          else
+            echo "  ⚠️ vital файл не найден"
+          fi
+        else
+          echo "⚠️ synth директория не найдена"
+        fi
+        
+        if [ -d "$DEPLOY_DIR/processing" ]; then
+          echo "✅ processing директория найдена"
+          # Проверка конкретных файлов
+          if [ -d "$DEPLOY_DIR/processing/AllGVSTLinux64" ]; then
+            echo "  ✅ AllGVSTLinux64 директория найдена"
+          else
+            echo "  ⚠️ AllGVSTLinux64 не найдена"
+          fi
+        else
+          echo "⚠️ processing директория не найдена"
+        fi
+        
+        if [ -d "$DEPLOY_DIR/tools" ]; then
+          echo "✅ tools директория найдена"
+        else
+          echo "⚠️ tools директория не найдена"
+        fi
+        
+        # Проверка контрольных сумм для installer.sh
         LOCAL_HASH=$(sha256sum installer.sh | cut -d' ' -f1)
         REMOTE_HASH=$(sha256sum "$DEPLOY_DIR/installer.sh" | cut -d' ' -f1)
-        [ "$LOCAL_HASH" != "$REMOTE_HASH" ] && echo "::error::Checksum mismatch" && exit 1
+        
+        if [ "$LOCAL_HASH" == "$REMOTE_HASH" ]; then
+          echo "✅ Контрольная сумма installer.sh совпадает"
+        else
+          echo "::error::Checksum mismatch for installer.sh"
+          exit 1
+        fi
         
         # Проверка синтаксиса
-        if ! bash -n "$DEPLOY_DIR/installer.sh"; then
+        if bash -n "$DEPLOY_DIR/installer.sh"; then
+          echo "✅ Синтаксис installer.sh корректен"
+        else
           echo "::error::Syntax error in deployed installer"
           exit 1
         fi
@@ -190,11 +299,12 @@ jobs:
             exit 1
           fi
           bats "$DEPLOY_DIR/test_installer.bats" || exit 1
+          echo "✅ BATS тесты пройдены"
         else
           echo "No BATS tests found in deployment, skipping"
         fi
         
-        echo "All healthchecks passed"
+        echo "✅ Все healthchecks пройдены успешно!"
         
     - name: Unmount Yandex.Disk
       if: always()
