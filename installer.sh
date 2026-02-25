@@ -1,10 +1,7 @@
 #!/bin/bash
-#---------------------------------------------------------------#
-# Скрипт для установки музыкального ПО на Manjaro Linux v.1.1   #
-#---------------------------------------------------------------#
 
-# Часть конфигурации системы (требует root) test
-if [ "$1" == "--configure-system" ]; then
+# Часть конфигурации системы (требует root)
+configure_system() {
     if [ "$(whoami)" != "root" ]; then
         echo "Пожалуйста, запустите конфигурацию системы от root:"
         echo "  sudo ./installer.sh --configure-system"
@@ -26,6 +23,11 @@ if [ "$1" == "--configure-system" ]; then
     # Очистка временных файлов
     rm -f install_pwshwrapper.exe* yay-bin
     exit 0
+}
+
+# Проверка аргументов командной строки
+if [ "$1" == "--configure-system" ]; then
+    configure_system
 elif [ "$(whoami)" == "root" ] && [ "$1" != "--configure-system" ]; then
     echo "Пожалуйста, запустите этот скрипт от обычного пользователя после настройки системы:"
     echo "  ./installer.sh"
@@ -89,7 +91,21 @@ submenu2() {
                     echo "zenity выполнено: --notification --text=Vital установлен"
                 fi
                 ;;
-            # ... остальные варианты ...
+            "Surge")
+                if command -v yay >/dev/null; then
+                    yay -S --noconfirm surge
+                else
+                    echo "yay выполнено: -S --noconfirm surge"
+                fi
+                
+                if command -v zenity >/dev/null; then
+                    zenity --notification --text="Surge установлен"
+                else
+                    echo "zenity выполнено: --notification --text=Surge установлен"
+                fi
+                ;;
+            "Назад") break ;;
+            *) echo "Неверный вариант" ;;
         esac
         break
     done
@@ -143,6 +159,19 @@ submenu4() {
     done
 }
 
+# Функция для запуска конфигурации системы с sudo
+run_system_config() {
+    echo "Запуск настройки системы с правами root..."
+    sudo "$0" --configure-system
+    if [ $? -eq 0 ]; then
+        echo "Настройка системы выполнена успешно!"
+        read -p "Нажмите Enter для продолжения..."
+    else
+        echo "Ошибка при настройке системы!"
+        read -p "Нажмите Enter для продолжения..."
+    fi
+}
+
 # Главное меню
 main_menu() {
     while true; do
@@ -155,8 +184,7 @@ main_menu() {
         select opt in "${options[@]}"; do
             case $opt in
                 "Настройка системы")
-                    echo "Пожалуйста, сначала выполните настройку системы:"
-                    echo "  sudo ./installer.sh --configure-system"
+                    run_system_config
                     break
                     ;;
                 "Установить DAW")
