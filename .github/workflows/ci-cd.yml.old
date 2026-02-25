@@ -1,0 +1,205 @@
+name: CI/CD Pipeline to Yandex.Disk
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  YANDEX_BASE_FOLDER: ${{ secrets.YANDEX_BASE_FOLDER || 'github_deployments' }}
+
+jobs:
+  test:
+    name: Run BATS tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        submodules: false
+        
+    - name: Clean submodule artifacts
+      run: |
+        git submodule deinit -f . || true
+        rm -rf .git/modules/* || true
+        
+    - name: Install BATS
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bats
+        
+    - name: Make scripts executable
+      run: |
+        chmod +x installer.sh
+        [ -f "test_installer.bats" ] && chmod +x test_installer.bats || true
+        
+    - name: Execute tests
+      run: |
+        echo "Running BATS tests..."
+        if [ -f "test_installer.bats" ]; then
+          bats test_installer.bats || (echo "Tests failed" && exit 1)
+        else
+          echo "No BATS tests found, skipping"
+        fi
+
+  deploy:
+    name: Deploy to Yandex.Disk
+    needs: test
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Setup WebDAV environment
+      env:
+        YANDEX_USER: ${{ secrets.YANDEX_USER }}
+        YANDEX_PASSWORD: ${{ secrets.YANDEX_PASSWORD }}
+      run: |
+        echo "Setting up WebDAV connection..."
+        sudo apt-get update -qq
+        sudo apt-get install -yqq davfs2
+        
+        sudo mkdir -p /mnt/yandex_disk
+        sudo chown -R $USER:$USER /mnt/yandex_disk
+        
+        echo "https://webdav.yandex.ru $YANDEX_USER $YANDEX_PASSWORD" | sudo tee /etc/davfs2/secrets
+        sudo chmod 600 /etc/davfs2/secrets
+        
+        for i in {1..3}; do
+          if sudo mount -t davfs https://webdav.yandex.ru /mnt/yandex_disk -o noexec,uid=$(id -u),gid=$(id -g); then
+            echo "Mounted successfully on attempt $i"
+            break
+          else
+            echo "Mount attempt $i failed"
+            sleep 5
+          fi
+        done
+        
+        if ! mountpoint -q /mnt/yandex_disk; then
+          echo "::error::Failed to mount Yandex.Disk"
+          exit 1
+        fi
+        
+    - name: Prepare deployment
+      run: |
+        # Получаем время в UTC+3 (корректный синтаксис)
+        DEPLOY_TIME=$(date -d "+3 hours" +"%Y-%m-%d_%H-%M-%S")
+        
+        # Формируем путь
+        DEPLOY_DIR="/mnt/yandex_disk/$YANDEX_BASE_FOLDER/deploy_${DEPLOY_TIME}"
+        
+        mkdir -p "$DEPLOY_DIR"
+        
+        # Копируем только существующие файлы
+        [ -f "installer.sh" ] && cp -v installer.sh "$DEPLOY_DIR/"
+        [ -f "test_installer.bats" ] && cp -v test_installer.bats "$DEPLOY_DIR/"
+        [ -f "README.md" ] && cp -v README.md "$DEPLOY_DIR/"
+        
+        # Создаем файл с информацией о деплое
+        echo "Deployment time (UTC+3): ${DEPLOY_TIME}" > "$DEPLOY_DIR/deployment_info.txt"
+        echo "Commit: $GITHUB_SHA" >> "$DEPLOY_DIR/deployment_info.txt"
+        echo "Workflow: $GITHUB_RUN_ID" >> "$DEPLOY_DIR/deployment_info.txt"
+        
+        echo "DEPLOY_DIR=$DEPLOY_DIR" >> $GITHUB_ENV
+        echo "::notice::Files deployed to $DEPLOY_DIR"
+        
+    - name: Verify deployment
+      run: |
+        if [ ! -f "$DEPLOY_DIR/installer.sh" ]; then
+          echo "::error::Main installer file missing"
+          exit 1
+        fi
+        echo "Deployment verified"
+
+    - name: Unmount Yandex.Disk
+      if: always()
+      run: |
+        if mountpoint -q /mnt/yandex_disk; then
+          sudo umount /mnt/yandex_disk || echo "Unmount failed"
+        fi
+        sudo rm -f /etc/davfs2/secrets
+
+  healthcheck:
+    name: Post-Deployment Healthcheck
+    needs: deploy
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      
+    - name: Setup test environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bats
+        chmod +x installer.sh || true
+      
+    - name: Mount Yandex.Disk
+      env:
+        YANDEX_USER: ${{ secrets.YANDEX_USER }}
+        YANDEX_PASSWORD: ${{ secrets.YANDEX_PASSWORD }}
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -yqq davfs2
+        sudo mkdir -p /mnt/yandex_hc
+        echo "https://webdav.yandex.ru $YANDEX_USER $YANDEX_PASSWORD" | sudo tee /etc/davfs2/secrets
+        sudo chmod 600 /etc/davfs2/secrets
+        
+        if ! sudo mount -t davfs https://webdav.yandex.ru /mnt/yandex_hc -o noexec,uid=$(id -u),gid=$(id -g); then
+          echo "::error::Failed to mount for healthcheck"
+          exit 1
+        fi
+        
+    - name: Find latest deployment
+      run: |
+        DEPLOY_DIR=$(ls -td /mnt/yandex_hc/$YANDEX_BASE_FOLDER/deploy_* | head -1)
+        if [ -z "$DEPLOY_DIR" ]; then
+          echo "::error::No deployments found"
+          exit 1
+        fi
+        echo "DEPLOY_DIR=$DEPLOY_DIR" >> $GITHUB_ENV
+        
+    - name: Run healthchecks
+      run: |
+        echo "Running healthchecks on $DEPLOY_DIR"
+        
+        # Проверка наличия обязательных файлов
+        [ ! -f "$DEPLOY_DIR/installer.sh" ] && echo "::error::Installer missing" && exit 1
+        [ ! -f "$DEPLOY_DIR/README.md" ] && echo "::warning::README missing"
+        
+        # Проверка контрольных сумм
+        LOCAL_HASH=$(sha256sum installer.sh | cut -d' ' -f1)
+        REMOTE_HASH=$(sha256sum "$DEPLOY_DIR/installer.sh" | cut -d' ' -f1)
+        [ "$LOCAL_HASH" != "$REMOTE_HASH" ] && echo "::error::Checksum mismatch" && exit 1
+        
+        # Проверка синтаксиса
+        if ! bash -n "$DEPLOY_DIR/installer.sh"; then
+          echo "::error::Syntax error in deployed installer"
+          exit 1
+        fi
+        
+        # Запуск тестов (если есть)
+        if [ -f "$DEPLOY_DIR/test_installer.bats" ]; then
+          echo "Running BATS tests..."
+          if ! command -v bats >/dev/null 2>&1; then
+            echo "::error::BATS not installed in healthcheck environment"
+            exit 1
+          fi
+          bats "$DEPLOY_DIR/test_installer.bats" || exit 1
+        else
+          echo "No BATS tests found in deployment, skipping"
+        fi
+        
+        echo "All healthchecks passed"
+        
+    - name: Unmount Yandex.Disk
+      if: always()
+      run: |
+        if mountpoint -q /mnt/yandex_hc; then
+          sudo umount /mnt/yandex_hc || true
+        fi
+        sudo rm -f /etc/davfs2/secrets
